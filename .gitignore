@@ -1,0 +1,4 @@
+.idea/
+mqtt2lirc
+vendor/
+*.lock
