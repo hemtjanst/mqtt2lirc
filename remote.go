@@ -1,11 +1,19 @@
 package main
 
-import "github.com/ww24/lirc-web-api/lirc"
+import (
+	"errors"
+	"github.com/ww24/lirc-web-api/lirc"
+	"log"
+	"strconv"
+	"strings"
+	"time"
+)
 
 type Remote struct {
-	name  string
-	codes []string
-	lirc  lirc.ClientAPI
+	name      string
+	codes     []string
+	lirc      lirc.ClientAPI
+	PrefixLen int
 }
 
 func discoverRemotes(lircClient lirc.ClientAPI) (remotes map[string]*Remote, err error) {
@@ -31,15 +39,31 @@ func discoverRemotes(lircClient lirc.ClientAPI) (remotes map[string]*Remote, err
 	return
 }
 
+func codeToName(code string) string {
+	if code == "" {
+		return ""
+	}
+	if !strings.Contains(code, " ") {
+		return ""
+	}
+	return strings.Split(code, " ")[1]
+}
+
 func (r *Remote) discoverCodes() error {
 	list, err := r.lirc.List(r.name)
 	if err != nil {
 		return err
 	}
+
+	/**
+	 * Remove duplicates
+	 */
 	names := map[string]struct{}{}
 
 	for _, v := range list {
-		names[v] = nil
+		if n := codeToName(v); n != "" {
+			names[n] = struct{}{}
+		}
 	}
 
 	r.codes = make([]string, len(names))
@@ -48,4 +72,65 @@ func (r *Remote) discoverCodes() error {
 	}
 
 	return nil
+}
+
+func (r *Remote) verifyCode(code string) string {
+	for _, v := range r.codes {
+		if strings.ToUpper(v) == strings.ToUpper(code) {
+			return v
+		}
+	}
+	return ""
+}
+
+func (r *Remote) SendOnce(code string) error {
+	return r.Send(code, 0)
+}
+
+func (r *Remote) Send(code string, duration time.Duration) error {
+	code = r.verifyCode(code)
+	if code == "" {
+		return errors.New("Unknown code " + code)
+	}
+
+	if duration == 0 {
+		return r.lirc.SendOnce(r.name, code)
+	}
+	err := r.lirc.SendStart(r.name, code)
+	if err != nil {
+		return err
+	}
+
+	time.AfterFunc(duration, func() {
+		err := r.lirc.SendStop(r.name, code)
+		if err != nil {
+			log.Printf("Calling SendStop on %s/%s: %v", r.name, code, err)
+		}
+	})
+
+	return err
+}
+
+func (r *Remote) MQCallback(topic string, payload []byte) {
+	dur, err := strconv.Atoi(string(payload))
+	if err != nil {
+		// 0 = SEND_ONCE
+		dur = 0
+	}
+
+	if len(topic) <= r.PrefixLen {
+		return
+	}
+	code := topic[r.PrefixLen:]
+	log.Printf("[lirc] Sending %s to %s for %d ms (raw msg: %s[\"%s\"])", code, r.name, dur, topic, string(payload))
+
+	err = r.Send(code, time.Millisecond*time.Duration(dur))
+	if err != nil {
+		log.Printf("[lirc] Unable to send code (%s/%s@%dms): %v", r.name, code, dur, err)
+	}
+
+}
+
+func (r *Remote) Codes() []string {
+	return r.codes
 }
