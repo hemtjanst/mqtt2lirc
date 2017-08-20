@@ -12,11 +12,12 @@ import (
 type Remote struct {
 	name      string
 	codes     []string
-	lirc      lirc.ClientAPI
+	lirc      *lirc.Client
+	ch        chan *Command
 	PrefixLen int
 }
 
-func discoverRemotes(lircClient lirc.ClientAPI) (remotes map[string]*Remote, err error) {
+func discoverRemotes(lircClient *lirc.Client, ch chan *Command) (remotes map[string]*Remote, err error) {
 	var list []string
 	list, err = lircClient.List("")
 	if err != nil {
@@ -31,6 +32,7 @@ func discoverRemotes(lircClient lirc.ClientAPI) (remotes map[string]*Remote, err
 		remotes[v] = &Remote{
 			name: v,
 			lirc: lircClient,
+			ch:   ch,
 		}
 		remotes[v].discoverCodes()
 
@@ -66,7 +68,7 @@ func (r *Remote) discoverCodes() error {
 		}
 	}
 
-	r.codes = make([]string, len(names))
+	r.codes = []string{}
 	for k, _ := range names {
 		r.codes = append(r.codes, k)
 	}
@@ -92,23 +94,8 @@ func (r *Remote) Send(code string, duration time.Duration) error {
 	if code == "" {
 		return errors.New("Unknown code " + code)
 	}
-
-	if duration == 0 {
-		return r.lirc.SendOnce(r.name, code)
-	}
-	err := r.lirc.SendStart(r.name, code)
-	if err != nil {
-		return err
-	}
-
-	time.AfterFunc(duration, func() {
-		err := r.lirc.SendStop(r.name, code)
-		if err != nil {
-			log.Printf("Calling SendStop on %s/%s: %v", r.name, code, err)
-		}
-	})
-
-	return err
+	r.ch <- &Command{Remote: r.name, Code: code, Duration: duration}
+	return nil
 }
 
 func (r *Remote) MQCallback(topic string, payload []byte) {

@@ -1,4 +1,3 @@
 .idea/
-mqtt2lirc
+*mqtt2lirc
 vendor/
-*.lock
