@@ -1,14 +1,15 @@
 package main
 
 import (
+	"context"
 	"flag"
-	mq "github.com/eclipse/paho.mqtt.golang"
-	"github.com/hemtjanst/hemtjanst/messaging/flagmqtt"
+	"github.com/hemtjanst/bibliotek/transport/mqtt"
 	"github.com/ww24/lirc-web-api/lirc"
 	"log"
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -25,9 +26,10 @@ type Command struct {
 }
 
 func main() {
+	mqCfg := mqtt.MustFlags(flag.String, flag.Bool)
 	flag.Parse()
 	pfx := *flagTopicPrefix
-
+	cfg := mqCfg()
 	lircClient, err := lirc.New(*flagSocket)
 	if err != nil {
 		log.Fatalf("Unable to open connection to lirc: %v\r\n", err)
@@ -41,60 +43,48 @@ func main() {
 		log.Fatalf("Unable to interface with LIRC: %v\r\n", err)
 	}
 
-	mqttClient, err := flagmqtt.NewPersistentMqtt(flagmqtt.ClientConfig{
-		OnConnectHandler: func(client mq.Client) {
-			remoteNames := []string{}
-			for name, remote := range remotes {
-				rPfx := pfx + name
-				remote.PrefixLen = len(rPfx) + 1
-				client.Publish(
-					rPfx, // Topic
-					1,    // QoS
-					true, // Retain
-					[]byte(strings.Join(remote.Codes(), ",")),
-				)
-				rmt := remote
-				tok := client.Subscribe(rPfx+"/#", 1, func(client mq.Client, msg mq.Message) {
-					log.Printf("MQTT[%s]: %s", msg.Topic(), string(msg.Payload()))
-					rmt.MQCallback(msg.Topic(), msg.Payload())
-				})
-				tok.Wait()
-				if tok.Error() != nil {
-					log.Printf("Error subscribing to %s/#: %v", rPfx, tok.Error())
+	ctx, cancel := context.WithCancel(context.Background())
+	tr, err := mqtt.New(ctx, cfg)
+	if err != nil {
+		log.Fatalf("Unable to create MQTT transport: %v\r\n", err)
+	}
+
+	wg := sync.WaitGroup{}
+
+	for name, remote := range remotes {
+		wg.Add(1)
+		go func(name string, remote *Remote) {
+			defer wg.Done()
+			rPfx := pfx + name
+			remote.PrefixLen = len(rPfx) + 1
+			tr.Publish(rPfx, []byte(strings.Join(remote.Codes(), ",")), true)
+			rmtCh := tr.SubscribeRaw(rPfx + "/#")
+			for {
+				cmd, open := <-rmtCh
+				if !open {
+					return
 				}
-				remoteNames = append(remoteNames, name)
+				remote.MQCallback(cmd.TopicName, cmd.Payload)
 			}
 
-			client.Publish(
-				strings.TrimRight(pfx, "/"), // Topic
-				1,    // QoS
-				true, // Retain
-				[]byte(strings.Join(remoteNames, ",")),
-			)
-		},
-	})
-	if err != nil {
-		log.Fatalf("Unable to initialize MQTT: %v\r\n", err)
+		}(name, remote)
 	}
-	defer mqttClient.Disconnect(250)
-
-	connTok := mqttClient.Connect()
-	connTok.Wait()
-	if connTok.Error() != nil {
-		log.Fatalf("Unable to connect to MQTT: %v", connTok.Error())
-	}
-
 	quit := make(chan os.Signal)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 
-	lircQueue(ch, lircClient, quit)
+	go func() {
+		<-quit
+		cancel()
+	}()
+
+	lircQueue(ch, lircClient, ctx)
 }
 
-func lircQueue(ch chan *Command, lirc *lirc.Client, quit chan os.Signal) {
+func lircQueue(ch chan *Command, lirc *lirc.Client, ctx context.Context) {
 	var err error
 	for {
 		select {
-		case <-quit:
+		case <-ctx.Done():
 			return
 		case cmd := <-ch:
 			if cmd == nil {

@@ -1,7 +1,0 @@
-[[constraint]]
-  name = "github.com/hemtjanst/hemtjanst"
-  branch = "master"
-
-[[constraint]]
-  name = "github.com/ww24/lirc-web-api"
-  version = "0.2.10"
