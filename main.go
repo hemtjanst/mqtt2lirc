@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/hemtjanst/bibliotek/transport/mqtt"
 	"github.com/ww24/lirc-web-api/lirc"
+	"lib.hemtjan.st/transport/mqtt"
 	"log"
 	"os"
 	"os/signal"
